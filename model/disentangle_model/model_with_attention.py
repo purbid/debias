@@ -101,9 +101,8 @@ class Autoencoder(nn.Module):
             ############ size to maxlen +1 ?
 
             x = xs[0] ### [1,1,1...]
-
             # outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(self.device)
-            for t in range(1,self.longest_label):
+            for t in range(1,target_len):
                 output, hidden, _ = self.decoder(x, encoder_states, dec_hidden)
 
                 scores[t] =  output
@@ -191,7 +190,6 @@ class Autoencoder(nn.Module):
         y_u_bow = self.u_classifier_bow(unbias_code)
         y_c_bow = self.c_classifier_bow(content_code)
 
-        print(y_u_bow.shape, y_c_bow.shape)
 
 
         return y_u_gender, y_c_gender, y_u_bow, y_c_bow
@@ -257,7 +255,6 @@ class Encoder(nn.Module):
     def forward(self, xs):
 
         ori_xes = self.dropout(self.lt(xs))
-
         # print("encoder input shape is: "+str(ori_xes.shape))
 
         encoder_states, hidden = self.rnn(ori_xes)

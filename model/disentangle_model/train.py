@@ -191,10 +191,11 @@ for i in range(len(valid_data_list) // (n * batch_size) + 1):
 
         # text: (batch_size x seq_len)
         text = pad([x[0] for x in batch_list], padding=null_id)
+
         labels = torch.tensor([x[1] for x in batch_list], dtype=torch.long)
+
         valid_data.append((text, labels))
         j += 1
-
 
 c_classifier_gender_optim = optim.RMSprop(model.get_c_classifier_gender_params(), lr=lr)
 u_classifier_bow_optim = optim.RMSprop(model.get_u_classifier_bow_params(), lr=lr)
@@ -348,17 +349,18 @@ for epoch in range(n_epoch):
             for i_batch, batch in enumerate(valid_data):
                 # text: (batch_size x seq_len)
                 # labels: (batch_size)
-                text, labels = batch
-                text = text.to(device)
-                labels = labels.to(device)
+                val_text, val_labels = batch
+                val_text = val_text.to(device)
+                val_labels = val_labels.to(device)
 
                 # preds: (batch_size x seq_len)
                 # scores: (batch_size x seq_len x vocab_size)
-                preds = torch.zeros(20, 32).to(device)
-                scores = torch.zeros(20, 32, 30000).to(device)
-                preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text.permute(1, 0), scores, preds, train=True)
+                val_preds = torch.zeros(20, 32).to(device)
+                val_scores = torch.zeros(20, 32, 30000).to(device)
+
+
+                preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(val_text.permute(1, 0), val_scores, val_preds, train=True)
                 dists = nn.functional.softmax(scores, dim=2)
-                text = text.permute(1, 0)
                 loss, num_tokens = eval_loss(dists, text, pad_token=null_id)
                 total_loss += loss.item()
                 total_num_tokens += num_tokens
