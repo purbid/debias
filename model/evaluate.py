@@ -1,7 +1,7 @@
 import math
 import random
 import torch
-from evaluation.pycocoevalcap.bleu.bleu import Bleu
+from debias.evaluation.pycocoevalcap.bleu.bleu import Bleu
 
 def eval_ppl(model, xs, ps, ys, pad_token):
     loss = 0

@@ -11,7 +11,8 @@ from evaluate import get_data_for_inference, evaluate
 from options import opt
 from discriminators import Biased_Discriminator, Unbiased_Discriminator
 from disentangle_model.model import Autoencoder
-from evaluation.fairness_test import bias_evaluate
+from debias.evaluation.pycocoevalcap.bleu.bleu import  Bleu
+from debias.evaluation.fairness_test import bias_evaluate
 
 def pad(list, padding=0, min_len=None):
     padded = []

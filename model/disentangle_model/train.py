@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from nltk.corpus import stopwords
-from .model import Autoencoder
+from debias.model.disentangle_model.model_with_attention import Autoencoder
 
 def pad(list, padding=0, min_len=None):
     padded = []
@@ -60,6 +60,7 @@ def bow_loss(y_bow, bow_labels):
     :return:
     '''
 
+
     y_bow = nn.functional.softmax(y_bow, dim=1)
 
     # loss_for_each_batch: (batch_size)
@@ -113,7 +114,6 @@ print(opt)
 model = Autoencoder(emb_size=opt['emb_size'], hidden_size=opt['hidden_size'], unbias_size=opt['unbias_size'], content_size=opt['content_size'],
                     dict_file='../../data/twitter_seq2seq_model.dict',
                     dropout=opt['dropout'], rnn_class=opt['rnn_class'], device=device).to(device)
-
 n_epoch = 20
 batch_size = 32
 lr = 0.001
@@ -135,6 +135,10 @@ padding_weights = torch.ones(vocab_size).to(device)
 padding_weights[null_id] = 0
 WeightedCrossEntropyLoss = nn.CrossEntropyLoss(weight=padding_weights, reduce=True, reduction='mean')
 
+
+
+
+##### unbiased corpus in sent as trianing data, last 5k examples are validation set
 with open('../../data/unbias_corpus.json', 'r') as f:
     data_list = json.load(f)
     train_data_list = data_list[:-5000]
@@ -142,20 +146,37 @@ with open('../../data/unbias_corpus.json', 'r') as f:
 
 n = 10
 train_data = []
+######range(5000//321):
+    ###first batch is 0:320
 for i in range(len(train_data_list) // (n * batch_size) + 1):
     nbatch = train_data_list[i * (n * batch_size) : (i+1) * (n * batch_size)]
     nbatch_list = [([model.dict.tok2ind.get(word, unk_id) for word in ins[0].split()],
                     ins[1]) for ins in nbatch]
     descend_nbatch_list = sorted(nbatch_list, key=lambda x: len(x[0]), reverse=True)
-
     j = 0
+
+    #####descend_nbatch_list is the wordtoid descending order in terms of num of words
+    #### making mini batches of size 32
     while len(descend_nbatch_list[j * batch_size : (j+1) * batch_size]) > 0:
         batch_list = descend_nbatch_list[j * batch_size : (j+1) * batch_size]
         # text: (batch_size x seq_len)
+        ########## this pads the extra spacew ith zeroes
+
         text = pad([x[0] for x in batch_list], padding=null_id)
+
         labels = torch.tensor([x[1] for x in batch_list], dtype=torch.long)
+
+
         train_data.append((text, labels))
         j += 1
+
+
+"""
+example of train data tensor([   8,  175,  111,   11,  236,   18,  626,   22, 2000,    3,    9,   31,
+          28, 3094,   82, 5763,  115,   17, 1263,    4]) tensor(0)
+"""
+
+
 
 valid_data = []
 for i in range(len(valid_data_list) // (n * batch_size) + 1):
@@ -174,49 +195,79 @@ for i in range(len(valid_data_list) // (n * batch_size) + 1):
         valid_data.append((text, labels))
         j += 1
 
+
 c_classifier_gender_optim = optim.RMSprop(model.get_c_classifier_gender_params(), lr=lr)
 u_classifier_bow_optim = optim.RMSprop(model.get_u_classifier_bow_params(), lr=lr)
+overall_optim = optim.Adam(model.get_rest_parameters(), lr=lr)
 overall_optim = optim.Adam(model.get_rest_parameters(), lr=lr)
 
 # min_ppl = 1e6
 # patience = 0
 
+
+##### training now for 20 epochs
+
 for epoch in range(n_epoch):
     for i_batch, batch in enumerate(train_data):
         # text: (batch_size x seq_len)
         # labels: (batch_size)
+
         text, labels = batch
+
+        '''
+        Purbid changed the sequence, now it is 
+        seq_len (20) * batch_size, as per  encoder decoder 
+        convention
+        '''
+
         text = text.to(device)
         labels = labels.to(device)
 
         # bow_labels: (batch_size x vocab_size)
+
+
         bow_labels = get_bow(text)
         bow_labels = bow_labels.to(device)
+
+        text = text.permute(1, 0)
+
 
         model.train()
 
         # train c_classifier_gender
         _, y_c_gender, _, _ = model.forward_encoder(text)
+
         c_loss = CrossEntropyLoss(y_c_gender, labels)
+        ########### y_c_gender is the pred for if th text is male or female
+        ########### and then we calculate loss wrt labels
+
         if torch.isnan(c_loss):
             print("c_loss NAN.")
             print("y_c_gender, labels: ", y_c_gender, labels)
             continue
 
         c_classifier_gender_optim.zero_grad()
+
         c_loss.backward()
         torch.nn.utils.clip_grad_norm_(model.get_c_classifier_gender_params(), clip)
         c_classifier_gender_optim.step()
 
         c_preds = y_c_gender.argmax(dim=1)
+
+        ### calculate initial accuracy of the gender classifier using D2(DET)
+
         c_acc = torch.sum(c_preds == labels, dtype=torch.float32) / len(c_preds)
 
         if i_batch % 10 == 0:
             print(
             "train c_classifier_gender epoch: {}  batch: {} / {}  batch_size: {}  c_loss: {:.6f}  acc: {:.4f}".format(
-                epoch, i_batch, len(train_data), len(text), c_loss.item(), c_acc))
+                epoch, i_batch, len(train_data), len(text[0]), c_loss.item(), c_acc))
 
         # train u_classifier_bow
+
+
+        ##### now train on the bag of words, for unbiased features
+
         _, _, y_u_bow, _ = model.forward_encoder(text)
         u_loss = bow_loss(y_u_bow, bow_labels)
         if torch.isnan(u_loss):
@@ -233,12 +284,21 @@ for epoch in range(n_epoch):
         if i_batch % 10 == 0:
             print(
                 "train u_classifier_bow epoch: {}  batch: {} / {}  batch_size: {}  u_loss: {:.6f}".format(
-                    epoch, i_batch, len(train_data), len(text), u_loss.item()))
+                    epoch, i_batch, len(train_data), len(text[0]), u_loss.item()))
 
 
         # train autoencoder
-        preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text, train=True)
-        reconstruction_loss = WeightedCrossEntropyLoss(scores.view(-1, scores.size()[2]), text.view(-1,))
+        preds = torch.zeros(20, 32).to(device)
+        scores = torch.zeros(20, 32, 30000).to(device)
+
+        preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text, scores, preds, train=True)
+
+        ## again doing a permute to make sure text.view runs
+
+        text = text.permute(1, 0)
+
+        reconstruction_loss = WeightedCrossEntropyLoss(scores.reshape(-1, scores.shape[2]), text.reshape(-1))
+
         u_gender_loss = CrossEntropyLoss(y_u_gender, labels)
         c_gender_loss = EntropyLoss(y_c_gender)
 
@@ -257,7 +317,11 @@ for epoch in range(n_epoch):
         torch.nn.utils.clip_grad_norm_(model.get_rest_parameters(), clip)
         overall_optim.step()
 
-        re_acc = accuracy(preds, text)
+
+        #### chnaged, will fix later
+
+        re_acc = 0
+            # accuracy(preds, text)
         u_preds = y_u_gender.argmax(dim=1)
         u_acc = torch.sum(u_preds == labels, dtype=torch.float32) / len(u_preds)
         c_preds = y_c_gender.argmax(dim=1)
@@ -290,9 +354,11 @@ for epoch in range(n_epoch):
 
                 # preds: (batch_size x seq_len)
                 # scores: (batch_size x seq_len x vocab_size)
-                preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text, train=True)
+                preds = torch.zeros(20, 32).to(device)
+                scores = torch.zeros(20, 32, 30000).to(device)
+                preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text.permute(1, 0), scores, preds, train=True)
                 dists = nn.functional.softmax(scores, dim=2)
-
+                text = text.permute(1, 0)
                 loss, num_tokens = eval_loss(dists, text, pad_token=null_id)
                 total_loss += loss.item()
                 total_num_tokens += num_tokens
@@ -325,7 +391,7 @@ for epoch in range(n_epoch):
 
             print("Validation ppl: {}  u_acc: {}  c_acc: {}".format(ppl, u_correct_num / u_num, c_correct_num / c_num))
 
-            torch.save(model.state_dict(), 'save_model/disen_model.pt')
+            torch.save(model.state_dict(), '/Users/purbid/PycharmProjects/debias/Debiased-Chat/debias/model/disentangle_model/save_model/disen_model.pt')
             print("Model saved to save_model/disen_model.pt")
             print("Model performance: ppl_{:.4f} u_acc_{:.4f} c_acc_{:.4f}".format(ppl, u_correct_num / u_num,
                                                                                    c_correct_num / c_num))

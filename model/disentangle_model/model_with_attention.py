@@ -6,7 +6,7 @@ from torch.nn.parameter import Parameter
 from torch.nn.utils.rnn import pad_packed_sequence, pack_padded_sequence
 import torch.nn.functional as F
 from .dict_v0 import DictionaryAgent
-
+import random
 
 class Autoencoder(nn.Module):
     def __init__(self, emb_size, hidden_size, unbias_size, content_size, dict_file, dropout, rnn_class, device):
@@ -45,94 +45,85 @@ class Autoencoder(nn.Module):
 
         self.device = device
 
-    def forward(self, xs, train = True):
+    def forward(self, xs, scores, preds, train=True):
         '''
 
-        :param xs: (batch_size x seq_len)
+        :param xs: (seq_len x batch_size)
         :return:
         '''
-
-        ####### len of xs is 32
-
-        bsz = len(xs)
-
+        bsz = xs.shape[1]
+        target_len = xs.shape[0]
         # enc_hidden: (1 x batch_size x hidden_size)
 
-        ######## gives the final output andd final hidden state of encoder
-        enc_out, enc_hidden = self.encoder(xs)
-
+        encoder_states, enc_hidden = self.encoder(xs)
         # enc_hidden: (batch_size x hidden_size)
         enc_hidden = enc_hidden.squeeze(0)
-
         # unbias_code: (batch_size x unbias_size)
         # content_code: (batch_size x content_size)
-
         unbias_code = nn.functional.relu(self.h2u(enc_hidden))
         content_code = nn.functional.relu(self.h2c(enc_hidden))
-
         # y_u_gender: (batch_size x 2)
         # y_c_gender: (batch_size x 2)
-
         ######### we feed the vectors to D1(DET) and D2(DET) here,
         ######## to get their gender preds, d1(det) should be high,
         ######## d2(det should be middle)
-
         y_u_gender = self.u_classifier_gender(unbias_code)
         y_c_gender = self.c_classifier_gender(content_code)
 
         # y_u_bow: (batch_size x vocab_size)
         # y_c_bow: (batch_size x vocab_size)
-
-
-
         ####### now the bag of words, why is this needed, can it be replaced by TF-IDF?
-
 
         y_u_bow = self.u_classifier_bow(unbias_code)
         y_c_bow = self.c_classifier_bow(content_code)
 
         # state: (batch_size x unbias_size+content_size)
-
         ##### this is the f'=f(u)+f(s) step
-
-
         state = torch.cat((unbias_code, content_code), 1)
 
-        # dec_hidden: (1 x batch_size x hidden_size)
-
+        # dec_hidden: (1 x batch_size x hidden_size
         dec_hidden = nn.functional.leaky_relu(self.s2h(state)).unsqueeze(0)
 
         # starts: (batch_size x 1)
         starts = torch.LongTensor([self.START_IDX] * bsz).unsqueeze(1).to(self.device).detach()
-
 
         if train:
 
             #####narrow takes (input, dim, start, length)
             ###### this means narrow along first dimension, starting point is 0 and ending pt. is 19?(YESH)
 
-            y_in = xs.narrow(1, 0, xs.size(1) - 1)
+            # y_in = xs.narrow(1, 0, xs.size(0) - 1)
 
+            xs=xs[1:]
+            xs = torch.cat((starts.permute(1, 0), xs), dim=0)
 
-
-            xs = torch.cat([starts, y_in], 1)
-            ###### we ar eloosing the last word here, beacuse we add +1 in the begining. should we keep tensor
+            ###### we are loosing the last word here, beacuse we add +1 in the begining. should we keep tensor
             ############ size to maxlen +1 ?
 
+            x = xs[0] ### [1,1,1...]
 
+            # outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(self.device)
+            for t in range(1,self.longest_label):
+                output, hidden, _ = self.decoder(x, encoder_states, dec_hidden)
 
-            # preds: (batch_size x seq_len)
-            # score: (batch_size x seq_len x vocab_size)
+                scores[t] =  output
+                # preds[t] = hidden
 
+                best_guess = output.argmax(1)
 
+                if random.random() <  0.5:
+                    x = xs[t]
+                else:
+                    x = best_guess
 
-            preds, score, _ = self.decoder(xs, dec_hidden)
-            scores = score
+            # preds, score, _ = self.decoder(xs, encoder_states, dec_hidden)
 
         else:
-            done = [False for _ in range(bsz)]
+
             scores = []
             preds = []
+            done = [False for _ in range(bsz)]
+
             total_done = 0
             xs = starts
             hidden = dec_hidden
@@ -142,7 +133,7 @@ class Autoencoder(nn.Module):
 
                 # pred: (batch_size x 1)
                 # score: (batch_size x 1 x vocab_size)
-                pred, score, hidden = self.decoder(xs, hidden)
+                pred, score, hidden = self.decoder(xs, encoder_states, hidden)
                 scores.append(score)
                 xs = pred
                 preds.append(pred)
@@ -163,21 +154,21 @@ class Autoencoder(nn.Module):
             # score: (batch_size x seq_len x vocab_size)
             preds = torch.cat(preds, 1)
             scores = torch.cat(scores, 1)
-
+        ### pred dim is 32,20
+        ## score dim is 32, 30, 30000
         return preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow
 
     def forward_encoder(self, xs):
         '''
 
-        :param xs: (batch_size x seq_len)
+        :param xs: (seq_len x batch_size)
         :return:
         '''
 
-        # enc_hidden: (1 x batch_size x hidden_size)
-        enc_out, enc_hidden = self.encoder(xs)
+        _, enc_hidden = self.encoder(xs)
         # enc_hidden: (batch_size x hidden_size)
 
-        ####### squeexe to change from 1*32*1000 to 32*1000
+        ####### squeeze to change from 1*32*1000 to 32*1000
 
         enc_hidden = enc_hidden.squeeze(0)
         # unbias_code: (batch_size x unbias_size)
@@ -186,7 +177,6 @@ class Autoencoder(nn.Module):
 
         ###########this relu takes the final hidden state and splits it into two vectors, this is
         ########## is where f(u) and f(s) are born.
-
 
         unbias_code = nn.functional.relu(self.h2u(enc_hidden))
         content_code = nn.functional.relu(self.h2c(enc_hidden))
@@ -200,6 +190,9 @@ class Autoencoder(nn.Module):
         # y_c_bow: (batch_size x vocab_size)
         y_u_bow = self.u_classifier_bow(unbias_code)
         y_c_bow = self.c_classifier_bow(content_code)
+
+        print(y_u_bow.shape, y_c_bow.shape)
+
 
         return y_u_gender, y_c_gender, y_u_bow, y_c_bow
 
@@ -255,62 +248,35 @@ class Encoder(nn.Module):
                                    sparse=False)
 
         self.rnn = rnn_class(emb_size, hidden_size, num_layers,
-                                 dropout=dropout, batch_first=True,
-                                 bidirectional=False)
+                                 dropout=dropout,bidirectional=True)
+
+        ##### choose which pass(front/back) to use
+        self.fc_hidden = nn.Linear(hidden_size*2, hidden_size)
+
 
     def forward(self, xs):
-        # embed input tokens
-        # xes = self.dropout(self.lt(xs))
+
         ori_xes = self.dropout(self.lt(xs))
 
-        print(ori_xes.shape)   ##### should be 32*20*300
-        print("encoder input shape before packed padded sequence is: "+str(ori_xes.shape))
+        # print("encoder input shape is: "+str(ori_xes.shape))
 
-        try:
-            # x_lens = [x for x in torch.sum((xs > 0).int(), dim=1).data]
-            # xes = pack_padded_sequence(xes, x_lens, batch_first=True)
-            # packed = True
-            ori_x_lens = np.asarray([x for x in torch.sum((xs > 0).int(), dim=1).data])
-            # print("ori_x_lens: ", ori_x_lens)
-            x_lens_arg = np.argsort( - ori_x_lens)
-            x_lens_arg_ver = []
-            for i in range(len(ori_x_lens)):
-                x_lens_arg_ver.append(np.where(x_lens_arg==i)[0][0])
-            # x_lens_arg_ver = np.asarray(x_lens_arg_ver)
-            # print("x_lens_arg: ", x_lens_arg)
-            # print("x_lens_arg_ver: ", x_lens_arg_ver)
-            x_lens = ori_x_lens[x_lens_arg].tolist()
-            # print("x_lens: ", x_lens)
-            xes = ori_xes[x_lens_arg]
+        encoder_states, hidden = self.rnn(ori_xes)
 
-            xes = pack_padded_sequence(xes, x_lens, batch_first=True)
-            # print("xes: ", xes)
-            packed = True
-        except ValueError:
-            # packing failed, don't pack then
-            packed = False
-        # print("shape of encoder input: "+str(xes.shape)) ###32*20
+        # print("encoder output states is: "+str(encoder_states.shape))
+        # print("encoder hidden state final is: "+str(hidden.shape))
 
-        encoder_output, hidden = self.rnn(xes)
-        # print(hidden.shape)
-        # print("chanign dimensions")
-        # hidden=torch.cat((hidden[0]+hidden[1]), dim=2)
-        # print("new dimensions: "+str(hidden.shape))
+        hidden = self.fc_hidden(torch.cat((hidden[0:1],hidden[1:2]), dim=2))
+
+
         # print("encoder_output: ", encoder_output)
         # print("hidden: ", hidden)
         # print("hidden: ", hidden[0].size(), hidden[1].size())
-        if packed:
-            encoder_output, _ = pad_packed_sequence(encoder_output, batch_first=True)
-        # print("encoder_output: ", encoder_output.size())
-
-        hidden = torch.transpose(torch.transpose(hidden, 0, 1)[x_lens_arg_ver], 0, 1).contiguous()
+        # hidden = torch.transpose(torch.transpose(hidden, 0, 1)[x_lens_arg_ver], 0, 1).contiguous()
         # hidden = (torch.transpose(torch.transpose(hidden[0], 0, 1)[x_lens_arg_ver], 0, 1).contiguous(), torch.transpose(torch.transpose(hidden[1], 0, 1)[x_lens_arg_ver], 0, 1).contiguous())
         # print("hidden: ", hidden)
         # print("encoder_output: ", encoder_output)
-        encoder_output = encoder_output[x_lens_arg_ver]
-        # print("encoder_output: ", encoder_output)
 
-        return encoder_output, hidden
+        return encoder_states, hidden
 
     def forward_oh(self, xs_oh, x_lens):
         '''
@@ -377,15 +343,21 @@ class Decoder(nn.Module):
                                'if you want a padding_idx other than zero.')
 
         self.dropout = nn.Dropout(p=dropout)
-        print("dropout: ", dropout)
         self.layers = num_layers
         self.hsz = hidden_size
         self.esz = emb_size
 
         self.lt = nn.Embedding(num_features, emb_size, padding_idx=padding_idx,
                                sparse=False)
-        self.rnn = rnn_class(emb_size, hidden_size, num_layers,
-                             dropout=dropout, batch_first=True)
+        self.rnn = rnn_class(hidden_size*2+emb_size, hidden_size, num_layers,
+                             dropout=dropout)
+
+        self.energy = nn.Linear(hidden_size*3, 1)
+        ##### make sure the dim 0 is the seq length = 20 one
+        self.softmax = nn.Softmax(dim=0)
+        self.relu = nn.ReLU()
+        self.fc = nn.Linear(hidden_size, num_features)
+
 
         # rnn output to embedding
         if hidden_size != emb_size:
@@ -402,31 +374,56 @@ class Decoder(nn.Module):
         self.shared = shared_weight is not None
 
 
-    def forward(self, xs, hidden, topk=1):
+
+
+    def forward(self, xs, encoder_states, hidden, topk=1):
+
+        xs = xs.unsqueeze(0)
 
         xes = self.dropout(self.lt(xs))
-        if xes.dim() == 2:
+
+        sequence_length = encoder_states.shape[0]
+        h_reshaped = hidden.repeat(sequence_length, 1, 1)
+        ######h_reshaped should be (seq_len, batch_size, hidden*2)
+        energy = self.relu(self.energy(torch.cat((h_reshaped, encoder_states), dim=2)))
+        attention = self.softmax(energy)
+
+
+        ## seq_len, batch size, 1
+        context_vector = torch.einsum("snk,snl->knl", attention, encoder_states)
+
+
+
+        decoder_rnn_input = torch.cat((context_vector, xes), dim=2)
+
+        ###### one word at a time, takes prev context vector and embedding
+
+        if decoder_rnn_input.dim() == 2:
             # if only one token inputted, sometimes needs unsquezing
-            xes.unsqueeze_(1)
-        output, new_hidden = self.rnn(xes, hidden)
+            decoder_rnn_input.unsqueeze_(1)
+        output, new_hidden = self.rnn(decoder_rnn_input, hidden)
+
+        preds = self.fc(output).squeeze(0)
+        #### should be 32 * 30000
 
         e = self.dropout(self.o2e(output))
         scores = self.e2s(e)
 
-        # # exclude __UNK__
-        # scores[:, :, 3] = -1e8
 
-        # select top scoring index, excluding the padding symbol (at idx zero)
-        # we can do topk sampling from renoramlized softmax here, default topk=1 is greedy
-        if topk == 1:
-            _max_score, idx = scores.narrow(2, 1, scores.size(2) - 1).max(2)
-        elif topk > 1:
-            max_score, idx = torch.topk(F.softmax(scores.narrow(2, 1, scores.size(2) - 1), 2), topk, dim=2, sorted=False)
-            probs = F.softmax(scores.narrow(2, 1, scores.size(2) - 1).gather(2, idx), 2).squeeze(1)
-            dist = torch.distributions.categorical.Categorical(probs)
-            samples = dist.sample()
-            idx = idx.gather(-1, samples.unsqueeze(1).unsqueeze(-1)).squeeze(-1)
-        preds = idx.add_(1)
+        # # # exclude __UNK__
+        # # scores[:, :, 3] = -1e8
+        #
+        # # select top scoring index, excluding the padding symbol (at idx zero)
+        # # we can do topk sampling from renoramlized softmax here, default topk=1 is greedy
+        # if topk == 1:
+        #     _max_score, idx = scores.narrow(2, 1, scores.size(2) - 1).max(2)
+        # elif topk > 1:
+        #     max_score, idx = torch.topk(F.softmax(scores.narrow(2, 1, scores.size(2) - 1), 2), topk, dim=2, sorted=False)
+        #     probs = F.softmax(scores.narrow(2, 1, scores.size(2) - 1).gather(2, idx), 2).squeeze(1)
+        #     dist = torch.distributions.categorical.Categorical(probs)
+        #     samples = dist.sample()
+        #     idx = idx.gather(-1, samples.unsqueeze(1).unsqueeze(-1)).squeeze(-1)
+        # preds = idx.add_(1)
 
         return preds, scores, new_hidden
 
