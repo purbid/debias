@@ -52,10 +52,6 @@ class Autoencoder(nn.Module):
         :return:
         '''
 
-
-
-
-
         ####### len of xs is 32
 
         bsz = len(xs)
