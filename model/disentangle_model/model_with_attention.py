@@ -103,12 +103,20 @@ class Autoencoder(nn.Module):
             x = xs[0] ### [1,1,1...]
             # outputs = torch.zeros(trg_len, batch_size, trg_vocab_size).to(self.device)
             for t in range(1,target_len):
-                output, hidden, _ = self.decoder(x, encoder_states, dec_hidden)
 
-                scores[t] =  output
-                # preds[t] = hidden
+                # print("decoder input has size: "+str(x.shape))
 
-                best_guess = output.argmax(1)
+                pred, score, _ = self.decoder(x, encoder_states, dec_hidden)
+                ## pred is 32*20
+                ## score is 1, 32, 30000
+
+
+                # print("shape of output is :"+str(pred.shape))
+                # print("shape of hidden is: "+str(score.shape))
+                scores[t] =  score.squeeze(0)
+
+                best_guess = pred.argmax(1)
+                preds[t] = best_guess
 
                 if random.random() <  0.5:
                     x = xs[t]
@@ -116,7 +124,6 @@ class Autoencoder(nn.Module):
                     x = best_guess
 
             # preds, score, _ = self.decoder(xs, encoder_states, dec_hidden)
-
         else:
 
             scores = []

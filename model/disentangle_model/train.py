@@ -7,6 +7,11 @@ import torch.optim as optim
 from nltk.corpus import stopwords
 from debias.model.disentangle_model.model_with_attention import Autoencoder
 
+
+
+using_attention=True
+
+
 def pad(list, padding=0, min_len=None):
     padded = []
     max_len = max([len(l) for l in list])
@@ -170,7 +175,6 @@ for i in range(len(train_data_list) // (n * batch_size) + 1):
         train_data.append((text, labels))
         j += 1
 
-
 """
 example of train data tensor([   8,  175,  111,   11,  236,   18,  626,   22, 2000,    3,    9,   31,
           28, 3094,   82, 5763,  115,   17, 1263,    4]) tensor(0)
@@ -230,7 +234,10 @@ for epoch in range(n_epoch):
         bow_labels = get_bow(text)
         bow_labels = bow_labels.to(device)
 
-        text = text.permute(1, 0)
+
+
+        if using_attention==True:
+            text = text.permute(1, 0)
 
 
         model.train()
@@ -289,16 +296,37 @@ for epoch in range(n_epoch):
 
 
         # train autoencoder
-        preds = torch.zeros(20, 32).to(device)
-        scores = torch.zeros(20, 32, 30000).to(device)
+        if using_attention==True:
+            preds = torch.zeros(text.shape[0], text.shape[1]).to(device)
+            scores = torch.zeros(text.shape[0], text.shape[1], 30000).to(device)
 
-        preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text, scores, preds, train=True)
+            preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text, scores, preds, train=True)
+            # print("pred shape is: "+str(preds.shape))
+            # print("labels are of shape: "+str(labels.shape))
+            ## again doing a permute to make sure text.view runs, back to batch_size*max_len
+            text = text.permute(1, 0)
+            preds = preds.permute(1, 0)
+            scores = scores.permute(1, 0, 2)
 
-        ## again doing a permute to make sure text.view runs
+            # print("score per every time step shape is: "+str(scores.shape))
+            # print("text target shpae is: "+str(text.shape))
+            # print("score mod shape: "+str(scores.reshape(-1, scores.shape[2]).shape))
+            reconstruction_loss = WeightedCrossEntropyLoss(scores.reshape(-1, scores.size()[2]), text.reshape(-1, ))
 
-        text = text.permute(1, 0)
+        else:
+            preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(text, train=True)
+            print("score per every time step shape is: " + str(scores.shape))
+            print("text target shpae is: " + str(text.shape))
 
-        reconstruction_loss = WeightedCrossEntropyLoss(scores.reshape(-1, scores.shape[2]), text.reshape(-1))
+            print("score mod shape: " + str(scores.view(-1, scores.size()[2]).shape))
+
+            '''
+                        score per every time step shape is: torch.Size([32, 20, 30000])
+                        text target shpae is: torch.Size([32, 20])
+                        score mod shape: torch.Size([640, 30000])
+            '''
+            reconstruction_loss = WeightedCrossEntropyLoss(scores.view(-1, scores.size()[2]), text.view(-1, ))
+
 
         u_gender_loss = CrossEntropyLoss(y_u_gender, labels)
         c_gender_loss = EntropyLoss(y_c_gender)
@@ -320,9 +348,7 @@ for epoch in range(n_epoch):
 
 
         #### chnaged, will fix later
-
-        re_acc = 0
-            # accuracy(preds, text)
+        re_acc = accuracy(preds, text)
         u_preds = y_u_gender.argmax(dim=1)
         u_acc = torch.sum(u_preds == labels, dtype=torch.float32) / len(u_preds)
         c_preds = y_c_gender.argmax(dim=1)
@@ -355,33 +381,42 @@ for epoch in range(n_epoch):
 
                 # preds: (batch_size x seq_len)
                 # scores: (batch_size x seq_len x vocab_size)
-                val_preds = torch.zeros(20, 32).to(device)
-                val_scores = torch.zeros(20, 32, 30000).to(device)
+                if using_attention==True:
 
+                    preds = torch.zeros(val_text.shape[1], val_text.shape[0]).to(device)
+                    scores = torch.zeros(val_text.shape[1], val_text.shape[0], 30000).to(device)
+                    val_text = val_text.permute(1, 0)
+                    preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(val_text, scores, preds, train=True)
+                    val_text=val_text.permute(1, 0)
+                    scores = scores.permute(1, 0, 2)
+                    preds = preds.permute(1, 0)
 
-                preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(val_text.permute(1, 0), val_scores, val_preds, train=True)
+                else:
+                    preds, scores, y_u_gender, y_c_gender, y_u_bow, y_c_bow = model(val_text,
+                                                                                    train=True)
+                # print("scores is "+str(scores.shape))
                 dists = nn.functional.softmax(scores, dim=2)
-                loss, num_tokens = eval_loss(dists, text, pad_token=null_id)
+                # print("dists is :"+str(dists.shape)+str(val_text.shape))
+                loss, num_tokens = eval_loss(dists, val_text, pad_token=null_id)
+                # exit()
+
                 total_loss += loss.item()
                 total_num_tokens += num_tokens
-
-                # re_acc = accuracy(preds, text)
+                re_acc = accuracy(preds, val_text)
                 u_preds = y_u_gender.argmax(dim=1)
-                u_correct_num += torch.sum(u_preds == labels, dtype=torch.float32)
+                u_correct_num += torch.sum(u_preds == val_labels, dtype=torch.float32)
                 u_num += len(u_preds)
 
                 c_preds = y_c_gender.argmax(dim=1)
-                c_correct_num += torch.sum(c_preds == labels, dtype=torch.float32)
+                c_correct_num += torch.sum(c_preds == val_labels, dtype=torch.float32)
                 c_num += len(c_preds)
-
                 if i_batch == r:
-                    for truth, pred in zip(text, preds):
+                    for truth, pred in zip(val_text, preds):
                         truth_null_id_list = [i for i in range(len(truth)) if truth[i] == null_id]
                         pred_eos_id_list = [i for i in range(len(pred)) if pred[i] == eos_id]
 
                         truth_null_id = len(truth) if len(truth_null_id_list) == 0 else truth_null_id_list[0]
                         pred_eos_id = len(pred) if len(pred_eos_id_list) == 0 else pred_eos_id_list[0]
-
                         print('truth: {}'.format(
                             ' '.join([model.dict.ind2tok.get(idx, '__unk__') for idx in truth[:truth_null_id].tolist()])))
                         print('pred: {}'.format(

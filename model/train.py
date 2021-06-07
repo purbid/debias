@@ -154,9 +154,11 @@ device = torch.device("cpu")
 
 
 
-my_module = importlib.import_module("parlai.agents.seq2seq.seq2seq")
-model_class = getattr(my_module, "Seq2seqAgent")
+my_module = importlib.import_module("parlai.agents.hugging_face.dialogpt")
+model_class = getattr(my_module, "DialogptAgent")
 print(opt)
+print(model_class)
+print("******")
 agent = model_class(opt)
 
 generator = agent.model.to(device)
